@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Sep 14 19:54:55 2020
+
+@author: hassan
+"""
+
+import numpy as np
+import tensorflow as tf
+from keras import layers
+
+# this does something interesting
+# it adds noise from the uniform distribution to the logits before taking the argmax
+# this noise is generated from the uniform distribution which we then take the log of, negate, take the log of again, and subtract from the logits
+# it's a mathematical trick that's equivalent to sampling from the categorical distribution represented by the logits
+# meaning, its the same as taking the softmax of the logits and sample from that probability distribution
+def sample(logits):
+  noise = tf.compat.v1.random_uniform(tf.shape(logits))
+  return tf.argmax(logits - tf.math.log(-tf.math.log(noise)), 1)
+
+# we intialize the weights of the layer to be orthogonal
+# in an orthogonal matrix, we have the additional constraint that the length of those vectors is 1
+# this, supposedly encourages the weights to learn different features from the input 
+def conv(inputs, nf, ks, strides, gain=1.0):
+  return tf.compat.v1.layers.conv2d(inputs, filters=nf, kernel_size=ks,
+                      strides=(strides, strides), activation=tf.nn.relu,
+                      kernel_initializer=tf.compat.v1.orthogonal_initializer(gain=gain))
+
+def dense(inputs, n, act=tf.nn.relu, gain=1.0):
+  return tf.compat.v1.layers.dense(inputs=inputs, units=n, activation=act,
+                         kernel_initializer=tf.compat.v1.orthogonal_initializer(gain))
+
+class CNN:
+# it starts by defining the placeholder X. it is a unit8, meaning, this CNN will take in a raw image
+# this helps save space bcs floats take up 32 bits whereas unit8 takes up 8 bits
+  def __init__(self, sess, ob_space, ac_space, nenv, nsteps, nstack, reuse=False):
+    gain = np.sqrt(2)
+    nbatch = nenv * nsteps
+    nh, nw, nc = ob_space.shape
+    ob_shape = (nbatch, nh, nw, nc * nstack)
+    X = tf.compat.v1.placeholder(tf.uint8, ob_shape)  # obs
+    # next, we normalize the image inputs to be b/w 0 and 1 (diving by 255)
+    X_normal = tf.cast(X, tf.float32) / 255.0
+    # next, we enter the scope model, which allows us to pass in the resue argument
+    # this is useful bcs we're going to create multiple instances of this class which correspond to the same NN
+    with tf.compat.v1.variable_scope("model", reuse=reuse):
+           
+      h1 = conv(X_normal, 32, 8, 4, gain)
+      h2 = conv(h1, 64, 4, 2, gain)
+      h3 = conv(h2, 64, 3, 1, gain)
+      h3 = tf.compat.v1.layers.flatten(h3)
+      h4 = dense(h3, 512, gain=gain)
+      pi = dense(h4, ac_space.n, act=None)
+      vf = dense(h4, 1, act=None)
+      # notice we have no activation functions in any of the layers
+      # for the value function, it makes sense since we're going to do a regression, and the reward may be + or -
+      # for the policy pi, which should be a probability distribution, this means what we have is the "logits", and not the final probabilities
+      # if we want the probabilities, we would ask for the softmax
+    
+    # next, we grab a0 and v0. 
+    # v0 is simple. Since the dense layer returns an Nx1 matrix, grabbing the 0 with column gives us an N-length vector, which we can use later
+    # for a0, we use the sample function (in the beginning of this file) on the logits of pi
+    # this is going to sample from the distribution represented by pi and return an actual action
+    v0 = vf[:, 0]
+    a0 = sample(pi)
+    # self.initial_state = []  # State reserved for LSTM
+
+    # next, we define a step function and a value function
+    # the step function takes in an observation and retuns an action and a value for that observation
+    # the value function just returns v0 (the value)
+    def step(ob):
+      a, v = sess.run([a0, v0], {X: ob})
+      return a, v#, []  # dummy state
+
+    def value(ob):
+      return sess.run(v0, {X: ob})
+    
+    # lastly, we assign some of the variables we just defined to be attributes of the model 
+    self.X = X
+    self.pi = pi
+    self.vf = vf
+    self.step = step
+    self.value = value
